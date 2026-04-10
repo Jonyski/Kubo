@@ -1,73 +1,161 @@
 #version 430 core
 out vec4 FragColor;
+in vec2 TexCoords;
 
-in vec3 FragPos;
-in vec3 Normal;
-in vec4 Color;
-in vec4 FragPosLightSpace;
-
-// Mapa de profundidade gerado no primeiro passe de renderização
-uniform sampler2D shadowMap;
-
-// Variáveis de iluminação
+uniform mat4 invView;
+uniform mat4 invProj;
+uniform vec3 camPos;
 uniform vec3 sunLightDir;
-uniform vec3 sunLightColor;
-uniform vec3 skyLightColor;
 
-float ShadowCalculation(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir)
-{
-    vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
-    projCoords = projCoords * 0.5 + 0.5;
+uniform sampler3D voxelGrid;
+uniform vec3 gridSize;
 
-    if (projCoords.z > 1.0)
-        return 0.0;
+struct HitResult {
+    bool hit;
+    vec3 pos;
+    vec3 normal;
+    vec4 color;
+};
 
-    float currentDepth = projCoords.z;
-
-    // Um viés quase zero, apenas para resolver as micro-flutuações do float
-    float bias = max(0.0015 * (1.0 - dot(normal, lightDir)), 0.00001);
-
-    // PCF
-    float shadow = 0.0;
-    vec2 texelSize = 1.0 / textureSize(shadowMap, 0);
-    for (int x = -1; x <= 1; ++x)
-    {
-        for (int y = -1; y <= 1; ++y)
-        {
-            float pcfDepth = texture(shadowMap, projCoords.xy + vec2(x, y) * texelSize).r;
-            shadow += currentDepth - bias > pcfDepth ? 1.0 : 0.0;
-        }
-    }
-    shadow /= 9.0;
-
-    return shadow;
+// Testa a intersecção do raio com os limites do grid (Bounding Box)
+vec2 intersectAABB(vec3 rayOrigin, vec3 rayDir, vec3 boxMin, vec3 boxMax) {
+    vec3 tMin = (boxMin - rayOrigin) / rayDir;
+    vec3 tMax = (boxMax - rayOrigin) / rayDir;
+    vec3 t1 = min(tMin, tMax);
+    vec3 t2 = max(tMin, tMax);
+    float tNear = max(max(t1.x, t1.y), t1.z);
+    float tFar = min(min(t2.x, t2.y), t2.z);
+    return vec2(tNear, tFar);
 }
 
-void main()
-{
-    vec3 normal = normalize(Normal);
-    vec3 lightDir = -normalize(sunLightDir);
+// O motor principal: Dispara um raio e devolve o que atingiu
+HitResult RayMarchDDA(vec3 ro, vec3 rd, vec3 boxMin, vec3 boxMax) {
+    HitResult result;
+    result.hit = false;
+    result.normal = vec3(0.0);
+    result.color = vec4(0.0);
 
-    // 1. Iluminação Ambiente Hemisférica (Céu e Chão)
-    // Faces apontando para cima recebem mais luz do céu
-    float skyFactor = max(dot(normal, vec3(0.0, 1.0, 0.0)), 0.0);
-    // Faces apontando para baixo recebem um leve rebatimento (bounce light) simulado
-    float groundFactor = max(dot(normal, vec3(0.0, -1.0, 0.0)), 0.0);
+    vec2 tBox = intersectAABB(ro, rd, boxMin, boxMax);
+    if (tBox.x > tBox.y || tBox.y < 0.0) return result;
 
-    vec3 ambient = (skyLightColor * 0.4 * skyFactor) + (vec3(0.15) * groundFactor) + vec3(0.2); // + vec3(0.2) é a luz base global
+    float t = max(0.0, tBox.x + 0.0001);
+    vec3 p = ro + rd * t;
 
-    // 2. Iluminação Difusa (Sol)
-    float diff = max(dot(normal, lightDir), 0.0);
-    vec3 diffuse = diff * sunLightColor;
+    ivec3 mapPos = ivec3(floor(p));
+    mapPos = clamp(mapPos, ivec3(0), ivec3(gridSize) - 1);
 
-    // 3. Cálculo de Sombras
-    float shadow = ShadowCalculation(FragPosLightSpace, normal, lightDir);
+    vec3 deltaDist = abs(1.0 / rd);
+    ivec3 rayStep = ivec3(sign(rd));
+    vec3 sideDist = (sign(rd) * (vec3(mapPos) - p) + (sign(rd) * 0.5) + 0.5) * deltaDist;
 
-    // Combinação Final: O ambiente sempre afeta, mas o sol e suas sombras são dinâmicos
-    vec3 lighting = (ambient + (1.0 - shadow) * diffuse) * Color.rgb;
+    ivec3 mask = ivec3(0);
 
-    // Correção Gamma simples para cores mais vivas (opcional, mas recomendado para PBR/Voxel)
-    lighting = pow(lighting, vec3(1.0 / 2.2));
+    for (int i = 0; i < 64; i++) {
+        vec3 texCoord = (vec3(mapPos) + 0.5) / gridSize;
+        vec4 voxel = texture(voxelGrid, texCoord);
 
-    FragColor = vec4(lighting, Color.a);
+        if (voxel.a > 0.0) {
+            result.hit = true;
+            result.color = voxel;
+
+            if (mask == ivec3(0)) {
+                // Se bateu no passo 0, a normal é a própria face da Bounding Box (AABB)
+                result.pos = p;
+                vec3 center = (boxMin + boxMax) * 0.5;
+                vec3 extents = (boxMax - boxMin) * 0.5;
+                vec3 localPos = p - center;
+                vec3 d = abs(localPos) / extents;
+                if (d.x >= d.y && d.x >= d.z) result.normal = vec3(sign(localPos.x), 0, 0);
+                else if (d.y >= d.x && d.y >= d.z) result.normal = vec3(0, sign(localPos.y), 0);
+                else result.normal = vec3(0, 0, sign(localPos.z));
+            } else {
+                // Se bateu num passo normal, recuamos para encontrar o ponto exato da face
+                float hitT = dot(vec3(mask), sideDist - deltaDist);
+                result.pos = p + rd * hitT;
+                result.normal = -vec3(mask) * sign(rd);
+            }
+            break;
+        }
+
+        mask = ivec3(lessThanEqual(sideDist.xyz, min(sideDist.yzx, sideDist.zxy)));
+        sideDist += vec3(mask) * deltaDist;
+        mapPos += mask * rayStep;
+
+        if (any(lessThan(mapPos, ivec3(0))) || any(greaterThanEqual(mapPos, ivec3(gridSize)))) break;
+    }
+
+    return result;
+}
+
+float interleavedGradientNoise(vec2 coord) {
+    vec3 magic = vec3(0.06711056, 0.00583715, 52.9829189);
+    return fract(magic.z * fract(dot(coord, magic.xy)));
+}
+
+void main() {
+    vec2 ndc = TexCoords * 2.0 - 1.0;
+    vec4 target = invProj * vec4(ndc.x, ndc.y, 1.0, 1.0);
+    vec3 rayDir = normalize((invView * vec4(normalize(target.xyz / target.w), 0.0)).xyz);
+
+    vec3 boxMin = vec3(0.0);
+    vec3 boxMax = gridSize;
+
+    // 1. Dispara o raio da câmera (Visão)
+    HitResult cameraHit = RayMarchDDA(camPos, rayDir, boxMin, boxMax);
+
+    if (cameraHit.hit) {
+        vec3 lightDir = normalize(-sunLightDir);
+        float diff = max(dot(cameraHit.normal, lightDir), 0.0);
+
+        // --- SOFT SHADOWS ---
+        float shadow = 0.0;
+        int shadowSamples = 16;
+        float shadowSpread = 0.04; // Diminua ligeiramente o spread para concentrar a penumbra
+
+        vec3 up = abs(lightDir.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+        vec3 tangent = normalize(cross(lightDir, up));
+        vec3 bitangent = cross(lightDir, tangent);
+
+        vec3 shadowOrigin = cameraHit.pos + cameraHit.normal * 0.01;
+
+        // Gera um ângulo de rotação pseudo-aleatório perfeito para o pixel atual
+        float noise = interleavedGradientNoise(gl_FragCoord.xy);
+        float randomAngle = noise * 6.2831853; // noise * 2 * PI
+        float cosAngle = cos(randomAngle);
+        float sinAngle = sin(randomAngle);
+
+        // Matriz de rotação 2D
+        mat2 rotation = mat2(cosAngle, -sinAngle, sinAngle, cosAngle);
+
+        for (int i = 0; i < shadowSamples; i++) {
+            // Amostragem de Disco de Vogel (Distribuição em espiral uniforme)
+            float r = sqrt(float(i) + 0.5) / sqrt(float(shadowSamples));
+            float theta = float(i) * 2.3999632; // Ângulo de Ouro em radianos
+
+            vec2 diskPos = vec2(cos(theta), sin(theta)) * r;
+
+            // Rotaciona a amostra baseada no pixel atual para esconder o padrão (Dithering)
+            diskPos = rotation * diskPos;
+
+            // Aplica a amostra aos vetores tangentes para espalhar o raio da luz
+            vec3 jitteredLightDir = normalize(lightDir + (tangent * diskPos.x + bitangent * diskPos.y) * shadowSpread);
+
+            // Dispara o raio de sombra modificado
+            HitResult shadowHit = RayMarchDDA(shadowOrigin, jitteredLightDir, boxMin, boxMax);
+            if (shadowHit.hit) {
+                shadow += 1.0;
+            }
+        }
+        shadow /= float(shadowSamples);
+
+        // --- ILUMINAÇÃO FINAL ---
+        vec3 ambient = vec3(0.64, 0.5, 0.75) + max(dot(cameraHit.normal, vec3(0, 1, 0)), 0.0) * 0.3;
+        vec3 diffuseColor = diff * vec3(1.0, 0.95, 0.8) * (1.0 - shadow);
+
+        vec3 lighting = (ambient + diffuseColor) * cameraHit.color.rgb;
+
+        FragColor = vec4(lighting, 1.0);
+    } else {
+        FragColor = vec4(0.5, 0.7, 1.0, 1.0); // Cor do céu
+    }
 }

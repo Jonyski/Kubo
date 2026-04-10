@@ -12,7 +12,6 @@
 
 // Helper classes
 #include "./src/camera.h"
-#include "./src/model.h"
 #include "./src/shader.h"
 #include "./src/voxelvolume.h"
 
@@ -82,7 +81,10 @@ int main() {
   glEnable(GL_DEPTH_TEST);
   glEnable(GL_CULL_FACE);
   glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
-  glClearColor(0.01f, 0.0f, 0.05f, 1.0f);
+
+  // Obligatory VAO
+  unsigned int emptyVAO;
+  glGenVertexArrays(1, &emptyVAO);
 
   // Lighting settings
   glm::vec3 sunLightDir = glm::normalize(glm::vec3(0.3f, -0.5f, -0.3f));
@@ -91,40 +93,12 @@ int main() {
 
   // Shaders
   Shader voxelShader("../shaders/voxel.vert", "../shaders/voxel.frag");
-  Shader depthShader("../shaders/depth.vert", "../shaders/depth.frag");
-
-  // Shadow Mapping's FBO
-  const unsigned int SHADOW_WIDTH = 4096, SHADOW_HEIGHT = 4096;
-  unsigned int depthMapFBO;
-  glGenFramebuffers(1, &depthMapFBO);
-
-  // Creates a 2D texture to store depth info
-  unsigned int depthMap;
-  glGenTextures(1, &depthMap);
-  glBindTexture(GL_TEXTURE_2D, depthMap);
-  glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, SHADOW_WIDTH,
-               SHADOW_HEIGHT, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-  float borderColor[] = {1.0, 1.0, 1.0, 1.0};
-  glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
-
-  // Put the texture in an FBO
-  glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
-  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
-                         depthMap, 0);
-  glDrawBuffer(GL_NONE);
-  glReadBuffer(GL_NONE);
-  glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
   // Example voxel art
   VoxelVolume volume(16, 16, 16);
   // Setting up some voxels
   volume.setVoxel(8, 0, 8, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
-  volume.setVoxel(8, 1, 8, true, glm::vec4(0.2f, 0.8f, 0.2f, 1.0f));
+  volume.setVoxel(8, 1, 8, true, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
   volume.setVoxel(9, 0, 8, true, glm::vec4(0.2f, 0.2f, 0.8f, 1.0f));
   volume.setVoxel(7, 0, 8, true, glm::vec4(0.2f, 0.2f, 0.8f, 1.0f));
   volume.setVoxel(8, 0, 7, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
@@ -139,70 +113,33 @@ int main() {
     lastFrame = currentFrame;
 
     // Processing Input
-    processInput(window); // Handle keyboard movement
+    processInput(window);
     volume.update();
 
-    // SHADOW MAPPING ----------------------------------------------------------
-    glm::mat4 lightProjection, lightView, lightSpaceMatrix;
-    float near_plane = 1.0f, far_plane = 50.0f;
-
-    lightProjection =
-        glm::ortho(-12.0f, 12.0f, -12.0f, 12.0f, near_plane, far_plane);
-
-    glm::vec3 lightPos = -sunLightDir * 30.0f;
-    lightView = glm::lookAt(lightPos, glm::vec3(8.0f, 0.0f, 8.0f),
-                            glm::vec3(0.0, 1.0, 0.0));
-    lightSpaceMatrix = lightProjection * lightView;
-
-    glm::mat4 model = glm::mat4(1.0f);
-
-    glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
-    glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
-    glClear(GL_DEPTH_BUFFER_BIT);
-    glEnable(GL_POLYGON_OFFSET_FILL);
-    glPolygonOffset(4.0f, 4.0f);
-
-    depthShader.use();
-    depthShader.setMat4("lightSpaceMatrix", lightSpaceMatrix);
-    depthShader.setMat4("model", model);
-    volume.draw(depthShader);
-
-    glDisable(GL_POLYGON_OFFSET_FILL);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    // -------------------------------------------------------------------------
-
-    // RENDERING THE VOXELS ----------------------------------------------------
-    glViewport(0, 0, SCR_WIDTH, SCR_HEIGHT);
     glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
     voxelShader.use();
 
-    // Matrices
+    // Invertemos as matrizes da câmera para enviar para o shader
     glm::mat4 projection =
         glm::perspective(glm::radians(camera.Zoom),
                          (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
     glm::mat4 view = camera.GetViewMatrix();
-    glm::mat3 normalMatrix = glm::mat3(glm::transpose(glm::inverse(model)));
 
-    voxelShader.setMat4("projection", projection);
-    voxelShader.setMat4("view", view);
-    voxelShader.setMat4("model", model);
-    voxelShader.setMat3("normalMatrix", normalMatrix);
+    voxelShader.setMat4("invProj", glm::inverse(projection));
+    voxelShader.setMat4("invView", glm::inverse(view));
+    voxelShader.setVec3("camPos", camera.Position);
+    voxelShader.setVec3("sunLightDir", glm::normalize(sunLightDir));
+    voxelShader.setVec3("gridSize",
+                        glm::vec3(volume.width, volume.height, volume.depth));
 
-    // Lighting properties
-    voxelShader.setMat4("lightSpaceMatrix", lightSpaceMatrix);
-    voxelShader.setVec3("sunLightDir", sunLightDir);
-    voxelShader.setVec3("sunLightColor", sunLightColor);
-    voxelShader.setVec3("skyLightColor", skyLightColor);
+    // Liga a textura 3D
+    volume.bind(0);
+    voxelShader.setInt("voxelGrid", 0);
 
-    // Binding the depth map generated before
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, depthMap);
-
-    volume.draw(voxelShader);
+    glBindVertexArray(emptyVAO);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
 
     // --- GLFW tasks ---
     glfwSwapBuffers(window);
