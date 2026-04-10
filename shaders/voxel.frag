@@ -13,6 +13,7 @@ uniform vec3 gridSize;
 struct HitResult {
     bool hit;
     vec3 pos;
+    bool isFloor;
     vec3 normal;
     vec4 color;
 };
@@ -32,6 +33,7 @@ vec2 intersectAABB(vec3 rayOrigin, vec3 rayDir, vec3 boxMin, vec3 boxMax) {
 HitResult RayMarchDDA(vec3 ro, vec3 rd, vec3 boxMin, vec3 boxMax) {
     HitResult result;
     result.hit = false;
+    result.isFloor = false;
     result.normal = vec3(0.0);
     result.color = vec4(0.0);
 
@@ -93,6 +95,7 @@ float interleavedGradientNoise(vec2 coord) {
 }
 
 void main() {
+    vec4 skyColor = vec4(0.5, 0.7, 1.0, 1.0);
     vec2 ndc = TexCoords * 2.0 - 1.0;
     vec4 target = invProj * vec4(ndc.x, ndc.y, 1.0, 1.0);
     vec3 rayDir = normalize((invView * vec4(normalize(target.xyz / target.w), 0.0)).xyz);
@@ -100,62 +103,101 @@ void main() {
     vec3 boxMin = vec3(0.0);
     vec3 boxMax = gridSize;
 
-    // 1. Dispara o raio da câmera (Visão)
+    // Dispara o raio da câmera (Visão)
     HitResult cameraHit = RayMarchDDA(camPos, rayDir, boxMin, boxMax);
 
-    if (cameraHit.hit) {
-        vec3 lightDir = normalize(-sunLightDir);
-        float diff = max(dot(cameraHit.normal, lightDir), 0.0);
+    // Grade no chão
+    float floorY = -0.001;
+    float tFloor = (floorY - camPos.y) / rayDir.y;
 
-        // --- SOFT SHADOWS ---
-        float shadow = 0.0;
-        int shadowSamples = 16;
-        float shadowSpread = 0.04; // Diminua ligeiramente o spread para concentrar a penumbra
+    // Se o raio aponta para baixo (tFloor > 0), ele vai bater no chão em algum lugar
+    if (tFloor > 0.0) {
+        vec3 floorP = camPos + rayDir * tFloor;
 
-        vec3 up = abs(lightDir.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
-        vec3 tangent = normalize(cross(lightDir, up));
-        vec3 bitangent = cross(lightDir, tangent);
+        if (floorP.x >= 0.0 && floorP.x <= gridSize.x && floorP.z >= 0.0 && floorP.z <= gridSize.z) {
+            // Distância até o voxel (se não bateu em nada, joga ao infinito)
+            float distVoxel = cameraHit.hit ? length(cameraHit.pos - camPos) : 9999999.0;
 
-        vec3 shadowOrigin = cameraHit.pos + cameraHit.normal * 0.01;
+            // Se o raio bateu no chão ANTES de bater num cubo, o chão é o que deve ser desenhado
+            if (tFloor < distVoxel) {
+                cameraHit.hit = true;
+                cameraHit.isFloor = true;
+                cameraHit.pos = floorP;
+                cameraHit.normal = vec3(0.0, 1.0, 0.0);
 
-        // Gera um ângulo de rotação pseudo-aleatório perfeito para o pixel atual
-        float noise = interleavedGradientNoise(gl_FragCoord.xy);
-        float randomAngle = noise * 6.2831853; // noise * 2 * PI
-        float cosAngle = cos(randomAngle);
-        float sinAngle = sin(randomAngle);
+                // Matemática para desenhar as linhas do Grid
+                vec2 gridUV = fract(floorP.xz);
+                float edgeDist = min(min(gridUV.x, 1.0 - gridUV.x), min(gridUV.y, 1.0 - gridUV.y));
+                float lineVal = step(edgeDist * 3, 0.04);
 
-        // Matriz de rotação 2D
-        mat2 rotation = mat2(cosAngle, -sinAngle, sinAngle, cosAngle);
+                // Cores do blueprint/chão
+                vec4 baseColor = vec4(0.1, 0.1, 0.2, 1.0);
+                vec4 lineColor = vec4(0.4, 0.4, 0.6, 1.0);
 
-        for (int i = 0; i < shadowSamples; i++) {
-            // Amostragem de Disco de Vogel (Distribuição em espiral uniforme)
-            float r = sqrt(float(i) + 0.5) / sqrt(float(shadowSamples));
-            float theta = float(i) * 2.3999632; // Ângulo de Ouro em radianos
+                // Mistura as cores baseada nas linhas
+                vec4 finalColor = mix(baseColor, lineColor, lineVal);
 
-            vec2 diskPos = vec2(cos(theta), sin(theta)) * r;
-
-            // Rotaciona a amostra baseada no pixel atual para esconder o padrão (Dithering)
-            diskPos = rotation * diskPos;
-
-            // Aplica a amostra aos vetores tangentes para espalhar o raio da luz
-            vec3 jitteredLightDir = normalize(lightDir + (tangent * diskPos.x + bitangent * diskPos.y) * shadowSpread);
-
-            // Dispara o raio de sombra modificado
-            HitResult shadowHit = RayMarchDDA(shadowOrigin, jitteredLightDir, boxMin, boxMax);
-            if (shadowHit.hit) {
-                shadow += 1.0;
+                cameraHit.color = vec4(finalColor);
             }
         }
-        shadow /= float(shadowSamples);
-
-        // --- ILUMINAÇÃO FINAL ---
-        vec3 ambient = vec3(0.64, 0.5, 0.75) + max(dot(cameraHit.normal, vec3(0, 1, 0)), 0.0) * 0.3;
-        vec3 diffuseColor = diff * vec3(1.0, 0.95, 0.8) * (1.0 - shadow);
-
-        vec3 lighting = (ambient + diffuseColor) * cameraHit.color.rgb;
-
-        FragColor = vec4(lighting, 1.0);
-    } else {
-        FragColor = vec4(0.5, 0.7, 1.0, 1.0); // Cor do céu
     }
+
+    vec3 lightDir = normalize(-sunLightDir);
+    float diff = max(dot(cameraHit.normal, lightDir), 0.0);
+
+    // --- SOFT SHADOWS ---
+    float shadow = 0.0;
+    int shadowSamples = 12;
+    float shadowSpread = 0.04; // Diminua ligeiramente o spread para concentrar a penumbra
+
+    vec3 up = abs(lightDir.y) < 0.999 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(lightDir, up));
+    vec3 bitangent = cross(lightDir, tangent);
+
+    vec3 shadowOrigin = cameraHit.pos + cameraHit.normal * 0.01;
+
+    // Gera um ângulo de rotação pseudo-aleatório perfeito para o pixel atual
+    float noise = interleavedGradientNoise(gl_FragCoord.xy);
+    float randomAngle = noise * 6.2831853; // noise * 2 * PI
+    float cosAngle = cos(randomAngle);
+    float sinAngle = sin(randomAngle);
+
+    // Matriz de rotação 2D
+    mat2 rotation = mat2(cosAngle, -sinAngle, sinAngle, cosAngle);
+
+    for (int i = 0; i < shadowSamples; i++) {
+        // Amostragem de Disco de Vogel (Distribuição em espiral uniforme)
+        float r = sqrt(float(i) + 0.5) / sqrt(float(shadowSamples));
+        float theta = float(i) * 2.3999632; // Ângulo de Ouro em radianos
+
+        vec2 diskPos = vec2(cos(theta), sin(theta)) * r;
+
+        // Rotaciona a amostra baseada no pixel atual para esconder o padrão (Dithering)
+        diskPos = rotation * diskPos;
+
+        // Aplica a amostra aos vetores tangentes para espalhar o raio da luz
+        vec3 jitteredLightDir = normalize(lightDir + (tangent * diskPos.x + bitangent * diskPos.y) * shadowSpread);
+
+        // Dispara o raio de sombra modificado
+        HitResult shadowHit = RayMarchDDA(shadowOrigin, jitteredLightDir, boxMin, boxMax);
+        if (shadowHit.hit) {
+            shadow += 1.0;
+        }
+    }
+    shadow /= float(shadowSamples);
+
+    // --- ILUMINAÇÃO FINAL ---
+    vec3 ambient = vec3(0.64, 0.5, 0.75) + max(dot(cameraHit.normal, vec3(0, 1, 0)), 0.0) * 0.3;
+    vec3 diffuseColor = diff * vec3(1.0, 0.95, 0.8) * (1.0 - shadow);
+    float floorAO = mix(0.1, 1.0, smoothstep(0.0, 1.2, cameraHit.pos.y / 2));
+
+    vec4 lighting = vec4((ambient + diffuseColor) * cameraHit.color.rgb, 1.0);
+    if (!cameraHit.isFloor) {
+        float ao = mix(0.0, 0.1, smoothstep(0.0, 1.0, cameraHit.pos.y));
+        lighting -= vec4(0.2 - 2 * ao, 0.2 - 2 * ao, 0.1 - 1 * ao, 0.0);
+    }
+
+    vec4 finalColor = mix(skyColor, lighting, cameraHit.color.a);
+
+    FragColor = finalColor;
 }

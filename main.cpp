@@ -95,14 +95,14 @@ int main() {
   Shader voxelShader("../shaders/voxel.vert", "../shaders/voxel.frag");
 
   // Example voxel art
-  VoxelVolume volume(16, 16, 16);
+  VoxelVolume volume(10, 10, 10);
   // Setting up some voxels
-  volume.setVoxel(8, 0, 8, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
-  volume.setVoxel(8, 1, 8, true, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-  volume.setVoxel(9, 0, 8, true, glm::vec4(0.2f, 0.2f, 0.8f, 1.0f));
-  volume.setVoxel(7, 0, 8, true, glm::vec4(0.2f, 0.2f, 0.8f, 1.0f));
-  volume.setVoxel(8, 0, 7, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
-  volume.setVoxel(8, 0, 9, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
+  volume.setVoxel(4, 0, 4, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
+  volume.setVoxel(4, 1, 4, true, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
+  volume.setVoxel(5, 0, 4, true, glm::vec4(0.2f, 0.2f, 0.8f, 1.0f));
+  volume.setVoxel(3, 0, 4, true, glm::vec4(0.2f, 0.2f, 0.8f, 1.0f));
+  volume.setVoxel(4, 0, 3, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
+  volume.setVoxel(4, 0, 5, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
   volume.update();
 
   // --- Main Render Loop ---
