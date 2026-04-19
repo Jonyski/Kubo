@@ -10,6 +10,11 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+// IMGUI
+#include "imgui/imgui.h"
+#include "imgui/imgui_impl_glfw.h"
+#include "imgui/imgui_impl_opengl3.h"
+
 // Helper classes
 #include "./src/camera.h"
 #include "./src/shader.h"
@@ -22,7 +27,7 @@
 const unsigned int SCR_WIDTH = 1000;
 const unsigned int SCR_HEIGHT = 800;
 
-// --- Globals for Camera ---
+// Camera
 Camera camera(glm::vec3(8.0f, 2.0f, 15.0f));
 float lastX = SCR_WIDTH / 2.0f;
 float lastY = SCR_HEIGHT / 2.0f;
@@ -32,12 +37,26 @@ bool firstMouse = true;
 float deltaTime = 0.0f; // Time between current frame and last frame
 float lastFrame = 0.0f; // Time of last frame
 
+// Voxel editing
+VoxelVolume *globalVolume = nullptr;
+glm::ivec3 cursorTarget;
+glm::ivec3 cursorHit;
+bool hasCursorTarget = false;
+bool isAimingAtBlock = false;
+
+// UI interaction
+bool UIMode = false;
+glm::vec4 selectedColor = glm::vec4(0.9f, 0.4f, 0.2f, 1.0f);
+
 // --- Input Callbacks ---
 void processInput(GLFWwindow *window);                             // Keyboard
 void mouse_callback(GLFWwindow *window, double xpos, double ypos); // Mouse aim
+void mouse_button_callback(GLFWwindow *window, int button, int action,
+                           int mods);
 void scroll_callback(GLFWwindow *window, double xoffset,
                      double yoffset); // Mouse zoom
-
+void key_callback(GLFWwindow *window, int key, int scancode, int action,
+                  int mods);
 void error_callback(int error, const char *description) {
   std::cerr << "GLFW Error (" << error << "): " << description << std::endl;
 }
@@ -69,13 +88,24 @@ int main() {
   // Tell GLFW to use our callbacks
   glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
   glfwSetCursorPosCallback(window, mouse_callback);
+  glfwSetMouseButtonCallback(window, mouse_button_callback);
   glfwSetScrollCallback(window, scroll_callback);
+  glfwSetKeyCallback(window, key_callback);
 
   // Glad stuff
   if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
     std::cerr << "Failed to initialize GLAD" << std::endl;
     return -1;
   }
+
+  // Dear ImGui Configs
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGuiIO &io = ImGui::GetIO();
+  (void)io;
+  ImGui::StyleColorsDark();
+  ImGui_ImplGlfw_InitForOpenGL(window, true);
+  ImGui_ImplOpenGL3_Init("#version 430");
 
   // Basic settings
   glEnable(GL_DEPTH_TEST);
@@ -95,14 +125,9 @@ int main() {
   Shader voxelShader("../shaders/voxel.vert", "../shaders/voxel.frag");
 
   // Example voxel art
-  VoxelVolume volume(10, 10, 10);
+  VoxelVolume volume(16, 16, 16);
+  globalVolume = &volume;
   // Setting up some voxels
-  volume.setVoxel(4, 0, 4, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
-  volume.setVoxel(4, 1, 4, true, glm::vec4(1.0f, 1.0f, 1.0f, 1.0f));
-  volume.setVoxel(5, 0, 4, true, glm::vec4(0.2f, 0.2f, 0.8f, 1.0f));
-  volume.setVoxel(3, 0, 4, true, glm::vec4(0.2f, 0.2f, 0.8f, 1.0f));
-  volume.setVoxel(4, 0, 3, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
-  volume.setVoxel(4, 0, 5, true, glm::vec4(0.8f, 0.2f, 0.2f, 1.0f));
   volume.update();
 
   // --- Main Render Loop ---
@@ -115,6 +140,9 @@ int main() {
     // Processing Input
     processInput(window);
     volume.update();
+
+    hasCursorTarget = volume.raycast(camera.Position, camera.Front, 100.0f,
+                                     cursorTarget, cursorHit, isAimingAtBlock);
 
     glClearColor(0.5f, 0.7f, 1.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -133,6 +161,9 @@ int main() {
     voxelShader.setVec3("sunLightDir", glm::normalize(sunLightDir));
     voxelShader.setVec3("gridSize",
                         glm::vec3(volume.width, volume.height, volume.depth));
+    voxelShader.setInt("hasCursor", hasCursorTarget ? 1 : 0);
+    voxelShader.setVec3("cursorTarget", glm::vec3(cursorTarget));
+    voxelShader.setVec2("resolution", glm::vec2(SCR_WIDTH, SCR_HEIGHT));
 
     // Liga a textura 3D
     volume.bind(0);
@@ -141,11 +172,36 @@ int main() {
     glBindVertexArray(emptyVAO);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    // Só desenhamos a janela se estivermos no Modo UI (após pressionar TAB)
+    if (UIMode) {
+      ImGui::Begin("ferramentas");
+
+      ImGui::Text("Pressione TAB para voltar a editar.");
+      ImGui::Separator();
+
+      // O ColorEdit4 cria a roda de cores e manipula a nossa variável GLM
+      // diretamente!
+      ImGui::ColorEdit4("Cor do Bloco", glm::value_ptr(selectedColor));
+
+      ImGui::End();
+    }
+
+    // Renderiza as instruções desenhadas acima
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
     // --- GLFW tasks ---
     glfwSwapBuffers(window);
     glfwPollEvents();
   }
 
+  ImGui_ImplOpenGL3_Shutdown();
+  ImGui_ImplGlfw_Shutdown();
+  ImGui::DestroyContext();
   glfwTerminate();
   return 0;
 }
@@ -173,6 +229,9 @@ void processInput(GLFWwindow *window) {
 
 // Camera direction control through mouse movement
 void mouse_callback(GLFWwindow *window, double xposIn, double yposIn) {
+  if (UIMode)
+    return;
+
   float xpos = static_cast<float>(xposIn);
   float ypos = static_cast<float>(yposIn);
 
@@ -191,8 +250,51 @@ void mouse_callback(GLFWwindow *window, double xposIn, double yposIn) {
   camera.ProcessMouseMovement(xoffset, yoffset);
 }
 
+void mouse_button_callback(GLFWwindow *window, int button, int action,
+                           int mods) {
+  if (!globalVolume)
+    return;
+
+  ImGuiIO &io = ImGui::GetIO();
+  if (io.WantCaptureMouse || UIMode)
+    return;
+
+  if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS &&
+      hasCursorTarget) {
+    // Adicionar Bloco (Botão Esquerdo)
+    if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS) {
+      if (hasCursorTarget) {
+        globalVolume->setVoxel(cursorTarget.x, cursorTarget.y, cursorTarget.z,
+                               true, selectedColor);
+      }
+    }
+
+    // Remover Bloco (Botão Direito)
+    if (button == GLFW_MOUSE_BUTTON_RIGHT && action == GLFW_PRESS) {
+      if (hasCursorTarget && isAimingAtBlock) {
+        // "Apagar" um voxel é simplesmente chamar setVoxel passando false para
+        // a flag de atividade
+        globalVolume->setVoxel(cursorHit.x, cursorHit.y, cursorHit.z, false);
+      }
+    }
+  }
+}
+
 // Camera zoom control through mouse scroll
 void scroll_callback(GLFWwindow *window, double xoffset, double yoffset) {
   // yoffset is the amount of scroll. Pass it to the camera.
   camera.ProcessMouseScroll(static_cast<float>(yoffset));
+}
+
+void key_callback(GLFWwindow *window, int key, int scancode, int action,
+                  int mods) {
+  if (key == GLFW_KEY_TAB && action == GLFW_PRESS) {
+    UIMode = !UIMode;
+    if (UIMode) {
+      glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    } else {
+      glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+      firstMouse = true;
+    }
+  }
 }

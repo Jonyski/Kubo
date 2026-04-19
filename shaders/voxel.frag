@@ -9,6 +9,9 @@ uniform vec3 sunLightDir;
 
 uniform sampler3D voxelGrid;
 uniform vec3 gridSize;
+uniform int hasCursor;
+uniform vec3 cursorTarget;
+uniform vec2 resolution;
 
 struct HitResult {
     bool hit;
@@ -18,7 +21,7 @@ struct HitResult {
     vec4 color;
 };
 
-// Testa a intersecção do raio com os limites do grid (Bounding Box)
+// Tests the intersection of the ray with the bounding volume
 vec2 intersectAABB(vec3 rayOrigin, vec3 rayDir, vec3 boxMin, vec3 boxMax) {
     vec3 tMin = (boxMin - rayOrigin) / rayDir;
     vec3 tMax = (boxMax - rayOrigin) / rayDir;
@@ -29,7 +32,7 @@ vec2 intersectAABB(vec3 rayOrigin, vec3 rayDir, vec3 boxMin, vec3 boxMax) {
     return vec2(tNear, tFar);
 }
 
-// O motor principal: Dispara um raio e devolve o que atingiu
+// Main ray-marching algorithm
 HitResult RayMarchDDA(vec3 ro, vec3 rd, vec3 boxMin, vec3 boxMax) {
     HitResult result;
     result.hit = false;
@@ -37,6 +40,7 @@ HitResult RayMarchDDA(vec3 ro, vec3 rd, vec3 boxMin, vec3 boxMax) {
     result.normal = vec3(0.0);
     result.color = vec4(0.0);
 
+    // Early return if it doesn't intersect the volume
     vec2 tBox = intersectAABB(ro, rd, boxMin, boxMax);
     if (tBox.x > tBox.y || tBox.y < 0.0) return result;
 
@@ -193,11 +197,52 @@ void main() {
 
     vec4 lighting = vec4((ambient + diffuseColor) * cameraHit.color.rgb, 1.0);
     if (!cameraHit.isFloor) {
-        float ao = mix(0.0, 0.1, smoothstep(0.0, 1.0, cameraHit.pos.y));
-        lighting -= vec4(0.2 - 2 * ao, 0.2 - 2 * ao, 0.1 - 1 * ao, 0.0);
+        float ao = mix(0.0, 0.1, smoothstep(0.0, 1.25, cameraHit.pos.y));
+        lighting -= vec4(0.1 - ao, 0.1 - ao, 0.05 - 0.5 * ao, 0.0);
     }
 
     vec4 finalColor = mix(skyColor, lighting, cameraHit.color.a);
+
+    // VOXEL TRANSPARENTE
+    if (hasCursor == 1) {
+        vec3 boxMin = cursorTarget;
+        vec3 boxMax = cursorTarget + vec3(1.0);
+
+        vec2 tCursor = intersectAABB(camPos, rayDir, boxMin, boxMax);
+
+        // Se o raio atravessa o "cubo alvo"
+        if (tCursor.x <= tCursor.y && tCursor.x > 0.0) {
+            float distToHit = cameraHit.hit ? length(cameraHit.pos - camPos) : 999999.0;
+
+            // Desenha apenas se o cursor flutuante estiver "à frente" dos blocos sólidos
+            if (tCursor.x < distToHit) {
+                vec3 p = camPos + rayDir * tCursor.x;
+                vec3 localP = p - boxMin;
+
+                // Deteta as quinas do bloco (usando o limite 0.5 a partir do centro)
+                vec3 d = abs(localP - 0.5);
+                vec3 e = step(0.485, d);
+                // O bloco de aresta acontece se duas faces estiverem muito próximas do extremo
+                float edgeFactor = clamp(e.x * e.y + e.y * e.z + e.z * e.x, 0.0, 1.0);
+
+                vec4 ghostColor = mix(vec4(0.9, 0.75, 1.0, 0.2), vec4(0.8, 0.75, 1.0, 1.0), edgeFactor);
+
+                // Aplica a mesclagem sobre os gráficos existentes
+                finalColor = mix(finalColor, ghostColor, ghostColor.a);
+            }
+        }
+    }
+
+    // CURSOR
+    vec2 screenCenter = resolution * 0.5;
+
+    // gl_FragCoord.xy contém a posição [X, Y] em pixels do fragmento atual
+    float distToCenter = length(gl_FragCoord.xy - screenCenter);
+
+    // Desenha um ponto branco sólido com 2 pixels de raio
+    if (distToCenter <= 3.0) {
+        finalColor = vec4(1.0);
+    }
 
     FragColor = finalColor;
 }
